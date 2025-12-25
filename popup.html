@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Auto Tab Grouper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Auto Tab Grouper</h1>
+    </div>
+    
+    <div class="main-actions">
+      <button id="organizeNow" class="primary-button">
+        🔧 Organize Now
+      </button>
+    </div>
+
+    <div class="settings-section">
+      <h3>Global Settings</h3>
+      
+      <div class="setting-item">
+        <label class="toggle-label">
+          <input type="checkbox" id="strictMode" class="toggle-input">
+          <span class="toggle-slider"></span>
+          <span class="setting-text">
+            <strong>Strict Mode</strong>
+            <small>Remove tabs from groups when URL changes</small>
+          </span>
+        </label>
+      </div>
+
+      <div class="setting-item">
+        <label class="toggle-label">
+          <input type="checkbox" id="mergeMode" class="toggle-input">
+          <span class="toggle-slider"></span>
+          <span class="setting-text">
+            <strong>Merge Mode</strong>
+            <small>Merge groups across windows</small>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <div class="rules-section">
+      <h3>Manual Rules</h3>
+      <div id="rulesPreview" class="rules-preview">
+        <div class="loading">Loading rules...</div>
+      </div>
+    </div>
+
+    <div class="footer-actions">
+      <button id="openOptions" class="secondary-button">
+        ⚙️ Manage Rules
+      </button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

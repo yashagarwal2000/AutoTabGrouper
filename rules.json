@@ -1,0 +1,8 @@
+{
+  "manualRules": {},
+  "settings": {
+    "groupBySubdomain": true,
+    "defaultStrictMode": false,
+    "defaultMergeAcrossWindows": true
+  }
+}

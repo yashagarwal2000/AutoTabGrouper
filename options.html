@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Auto Tab Grouper - Options</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>Auto Tab Grouper Settings</h1>
+      <p>Configure manual grouping rules and global behavior settings.</p>
+    </header>
+
+    <div class="content">
+      <!-- Global Settings -->
+      <section class="section">
+        <h2>Global Settings</h2>
+        
+        <div class="setting-group">
+          <div class="setting-item">
+            <label class="toggle-label">
+              <input type="checkbox" id="groupBySubdomain" class="toggle-input">
+              <span class="toggle-slider"></span>
+              <span class="setting-info">
+                <strong>Group by Subdomain</strong>
+                <small>Group by full subdomain (e.g., mail.google → google) vs. base domain only (e.g., google)</small>
+              </span>
+            </label>
+          </div>
+
+          <div class="setting-item">
+            <label class="toggle-label">
+              <input type="checkbox" id="defaultStrictMode" class="toggle-input">
+              <span class="toggle-slider"></span>
+              <span class="setting-info">
+                <strong>Default Strict Mode</strong>
+                <small>Remove tabs from groups when their URL changes (applies to new rules and auto-grouping)</small>
+              </span>
+            </label>
+          </div>
+
+          <div class="setting-item">
+            <label class="toggle-label">
+              <input type="checkbox" id="defaultMergeAcrossWindows" class="toggle-input">
+              <span class="toggle-slider"></span>
+              <span class="setting-info">
+                <strong>Default Merge Across Windows</strong>
+                <small>Merge groups with the same name across different windows (applies to new rules and auto-grouping)</small>
+              </span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- Manual Rules -->
+      <section class="section">
+        <div class="section-header">
+          <h2>Manual Grouping Rules</h2>
+          <button id="addRule" class="button primary">Add Rule</button>
+        </div>
+
+        <div class="rules-container">
+          <div id="rulesTable" class="rules-table">
+            <div class="loading-state">Loading rules...</div>
+          </div>
+
+          <div id="noRules" class="empty-state" style="display: none;">
+            <div class="empty-icon">📁</div>
+            <h3>No rules configured</h3>
+            <p>Add your first rule to start organizing tabs automatically.</p>
+            <button id="addFirstRule" class="button primary">Add First Rule</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Import/Export -->
+      <section class="section">
+        <h2>Import/Export</h2>
+        
+        <div class="import-export-container">
+          <div class="action-group">
+            <button id="exportRules" class="button secondary">📤 Export Rules</button>
+            <button id="importRules" class="button secondary">📥 Import Rules</button>
+            <input type="file" id="importFile" accept=".json" style="display: none;">
+          </div>
+          
+          <div class="help-text">
+            <small>Export your rules as a JSON file or import rules from a backup.</small>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Add/Edit Rule Modal -->
+    <div id="ruleModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="modalTitle">Add New Rule</h3>
+          <button id="closeModal" class="close-button">&times;</button>
+        </div>
+        
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="ruleDomain">Domain</label>
+            <input type="text" id="ruleDomain" placeholder="e.g., docs.google.com or youtube.com" class="form-input">
+            <small class="form-help">Enter the domain to match (without protocol)</small>
+          </div>
+
+          <div class="form-group">
+            <label for="ruleGroupName">Group Name</label>
+            <input type="text" id="ruleGroupName" placeholder="e.g., Work, Entertainment, Projects" class="form-input">
+            <small class="form-help">Name for the tab group</small>
+          </div>
+
+          <div class="form-group">
+            <div class="checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="ruleStrictMode" class="checkbox-input">
+                <span class="checkbox-mark"></span>
+                <span class="checkbox-text">
+                  <strong>Strict Mode</strong>
+                  <small>Remove tabs from this group when their URL changes</small>
+                </span>
+              </label>
+
+              <label class="checkbox-label">
+                <input type="checkbox" id="ruleMergeAcrossWindows" class="checkbox-input">
+                <span class="checkbox-mark"></span>
+                <span class="checkbox-text">
+                  <strong>Merge Across Windows</strong>
+                  <small>Merge tabs into the same group across different windows</small>
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="cancelRule" class="button secondary">Cancel</button>
+          <button id="saveRule" class="button primary">Save Rule</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div id="deleteModal" class="modal">
+      <div class="modal-content small">
+        <div class="modal-header">
+          <h3>Delete Rule</h3>
+        </div>
+        
+        <div class="modal-body">
+          <p>Are you sure you want to delete the rule for <strong id="deleteRuleDomain"></strong>?</p>
+        </div>
+
+        <div class="modal-footer">
+          <button id="cancelDelete" class="button secondary">Cancel</button>
+          <button id="confirmDelete" class="button danger">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

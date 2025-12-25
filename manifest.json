@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Auto Tab Grouper",
+  "version": "1.0.0",
+  "description": "Automatically groups tabs by domain with manual rules support. Includes strict mode and cross-window merging.",
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Auto Tab Grouper"
+  },
+  "options_page": "options.html",
+  "web_accessible_resources": [
+    {
+      "resources": ["rules.json"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
