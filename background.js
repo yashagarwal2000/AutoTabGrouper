@@ -23,6 +23,12 @@ class AutoTabGrouper {
     // Pre-processed rules for faster matching
     this.ruleKeys = []; // Cached array of rule keys
     this.hasRules = false; // Quick check flag
+
+    // Startup group reset state
+    this.isStartupCleanup = false;
+    this.startupCleanupTimeouts = [];
+    this.startupResetScheduled = false;
+    this.startupClearedAnyGroups = false;
     
     this.init();
   }
@@ -36,8 +42,169 @@ class AutoTabGrouper {
     
     await this.loadSettings();
     this.setupEventListeners();
+    this.setupStartupListener();
     await this.seedDefaultRules();
     this.startCacheCleanup(); // Prevent memory leaks
+    this.maybeScheduleStartupGroupReset();
+  }
+
+  getDefaultSettings() {
+    return {
+      groupBySubdomain: true,
+      defaultStrictMode: false,
+      defaultMergeAcrossWindows: true,
+      clearGroupsOnStartup: true
+    };
+  }
+
+  async detectNewBrowserSession() {
+    try {
+      const { sessionStarted } = await chrome.storage.session.get('sessionStarted');
+      if (sessionStarted === undefined) {
+        await chrome.storage.session.set({ sessionStarted: true });
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  setupStartupListener() {
+    if (chrome.runtime?.onStartup) {
+      chrome.runtime.onStartup.addListener(() => {
+        setTimeout(() => this.maybeScheduleStartupGroupReset(), 0);
+      });
+    }
+  }
+
+  async maybeScheduleStartupGroupReset() {
+    if (this.settings.clearGroupsOnStartup === false) {
+      return;
+    }
+
+    const isNewSession = await this.detectNewBrowserSession();
+    if (!isNewSession) {
+      return;
+    }
+
+    this.scheduleStartupGroupReset();
+  }
+
+  scheduleStartupGroupReset() {
+    if (this.startupResetScheduled) {
+      return;
+    }
+
+    this.startupResetScheduled = true;
+    this.startupClearedAnyGroups = false;
+    this.cancelStartupPasses();
+
+    const passDelays = [
+      { id: 'pass1', delay: 0 },
+      { id: 'pass2', delay: 2000 },
+      { id: 'pass3', delay: 5000 }
+    ];
+
+    for (const { id, delay } of passDelays) {
+      const timeout = setTimeout(() => this.executeStartupPass(id), delay);
+      this.startupCleanupTimeouts.push(timeout);
+    }
+  }
+
+  cancelStartupPasses() {
+    for (const timeout of this.startupCleanupTimeouts) {
+      clearTimeout(timeout);
+    }
+    this.startupCleanupTimeouts = [];
+  }
+
+  async executeStartupPass(passId) {
+    if (!this.startupResetScheduled) {
+      return;
+    }
+
+    const groupedTabIds = await this.getGroupedTabIds();
+
+    if (groupedTabIds.length > 0) {
+      await this.clearAllTabGroups(groupedTabIds);
+      this.startupClearedAnyGroups = true;
+    }
+
+    if (groupedTabIds.length === 0 && this.startupClearedAnyGroups) {
+      this.finishStartupReset();
+      return;
+    }
+
+    if (passId === 'pass3') {
+      this.finishStartupReset();
+    }
+  }
+
+  async finishStartupReset() {
+    this.cancelStartupPasses();
+    this.isStartupCleanup = false;
+    this.startupResetScheduled = false;
+
+    if (this.startupClearedAnyGroups) {
+      await this.organizeAllTabsBackground();
+    }
+  }
+
+  async getGroupedTabIds() {
+    try {
+      const tabs = await chrome.tabs.query({});
+      return tabs
+        .filter(tab => tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE)
+        .map(tab => tab.id);
+    } catch {
+      return [];
+    }
+  }
+
+  async clearAllTabGroups(tabIds = null) {
+    if (!tabIds) {
+      tabIds = await this.getGroupedTabIds();
+    }
+
+    if (tabIds.length === 0) {
+      return false;
+    }
+
+    this.isStartupCleanup = true;
+    this.groupCache.clear();
+
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < tabIds.length; i += BATCH_SIZE) {
+      const batch = tabIds.slice(i, i + BATCH_SIZE);
+      try {
+        await chrome.tabs.ungroup(batch);
+      } catch (error) {
+        console.error('Error ungrouping tabs during startup cleanup:', error);
+      }
+
+      if (i + BATCH_SIZE < tabIds.length) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+
+    return true;
+  }
+
+  async organizeAllTabsBackground() {
+    try {
+      const windows = await chrome.windows.getAll();
+      const delay = this.getOptimalDelay('background');
+
+      for (let i = 0; i < windows.length; i++) {
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        await this.groupTabsInWindow(windows[i].id);
+      }
+    } catch (error) {
+      console.error('Error organizing all tabs in background:', error);
+    }
   }
 
   startCacheCleanup() {
@@ -79,10 +246,9 @@ class AutoTabGrouper {
     try {
       const result = await chrome.storage.sync.get(['manualRules', 'settings']);
       this.rules = result.manualRules || {};
-      this.settings = result.settings || {
-        groupBySubdomain: true,
-        defaultStrictMode: false,
-        defaultMergeAcrossWindows: true
+      this.settings = {
+        ...this.getDefaultSettings(),
+        ...(result.settings || {})
       };
       
       // Pre-process rules for faster matching
@@ -92,10 +258,9 @@ class AutoTabGrouper {
       console.warn('Sync storage unavailable, falling back to local storage:', error);
       const result = await chrome.storage.local.get(['manualRules', 'settings']);
       this.rules = result.manualRules || {};
-      this.settings = result.settings || {
-        groupBySubdomain: true,
-        defaultStrictMode: false,
-        defaultMergeAcrossWindows: true
+      this.settings = {
+        ...this.getDefaultSettings(),
+        ...(result.settings || {})
       };
       
       // Pre-process rules for faster matching
@@ -243,6 +408,10 @@ class AutoTabGrouper {
   }
 
   debounceGrouping(windowId, context = 'default') {
+    if (this.isStartupCleanup) {
+      return;
+    }
+
     // Track pending tabs for this window
     const currentPending = this.pendingTabs.get(windowId) || 0;
     this.pendingTabs.set(windowId, currentPending + 1);
@@ -429,6 +598,10 @@ class AutoTabGrouper {
   }
 
   async groupTabsInWindow(windowId) {
+    if (this.isStartupCleanup) {
+      return;
+    }
+
     if (this.isGrouping) {
       return;
     }
@@ -466,10 +639,12 @@ class AutoTabGrouper {
         timestamp: Date.now() 
       });
 
-      // Create a map of existing groups for fast lookup
+      // Create a map of existing groups for fast lookup (skip empty titles so we don't reuse "blank" groups)
       const groupMap = new Map();
       existingGroups.forEach(group => {
-        groupMap.set(group.title, group.id);
+        if (group.title != null && String(group.title).trim() !== '') {
+          groupMap.set(group.title, group.id);
+        }
       });
 
       const tabsToGroup = new Map(); // groupName -> {tabs, config}
@@ -596,13 +771,15 @@ class AutoTabGrouper {
   async createGroupOptimized(operation, groupMap) {
     try {
       const { tabIds, groupName, windowId } = operation;
+      // Ensure we never set an empty title (Chrome shows pill-only when title is empty)
+      const titleToSet = (groupName && String(groupName).trim()) || 'Unnamed';
       const targetGroupId = await chrome.tabs.group({ 
         tabIds, 
         createProperties: { windowId } 
       });
       
-      await chrome.tabGroups.update(targetGroupId, { title: groupName });
-      groupMap.set(groupName, targetGroupId); // Update cache
+      await chrome.tabGroups.update(targetGroupId, { title: titleToSet });
+      groupMap.set(groupName, targetGroupId); // Update cache (keep original key for lookups)
       
       return targetGroupId;
     } catch (error) {
@@ -612,8 +789,11 @@ class AutoTabGrouper {
 
   async moveToGroupOptimized(operation) {
     try {
-      const { groupId, tabIds } = operation;
+      const { groupId, tabIds, groupName } = operation;
       await chrome.tabs.group({ tabIds, groupId });
+      // Ensure group title is set (fixes groups that had empty title from earlier runs or manual creation)
+      const titleToSet = (groupName && String(groupName).trim()) || 'Unnamed';
+      await chrome.tabGroups.update(groupId, { title: titleToSet });
     } catch (error) {
       console.error('Error moving to group:', error);
     }
@@ -638,14 +818,16 @@ class AutoTabGrouper {
       
       const tabIds = tabs.map(t => t.id);
       
+      const titleToSet = (groupName && String(groupName).trim()) || 'Unnamed';
       if (!targetGroupId) {
         // Create new group
         targetGroupId = await chrome.tabs.group({ tabIds, createProperties: { windowId } });
-        await chrome.tabGroups.update(targetGroupId, { title: groupName });
+        await chrome.tabGroups.update(targetGroupId, { title: titleToSet });
         groupMap.set(groupName, targetGroupId); // Update cache
       } else {
         // Add to existing group
         await chrome.tabs.group({ tabIds, groupId: targetGroupId });
+        await chrome.tabGroups.update(targetGroupId, { title: titleToSet });
       }
     } catch (error) {
       console.error('Error processing group:', error);

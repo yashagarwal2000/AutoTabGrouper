@@ -3,6 +3,7 @@
   "settings": {
     "groupBySubdomain": true,
     "defaultStrictMode": false,
-    "defaultMergeAcrossWindows": true
+    "defaultMergeAcrossWindows": true,
+    "clearGroupsOnStartup": true
   }
 }

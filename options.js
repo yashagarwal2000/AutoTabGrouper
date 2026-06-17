@@ -14,23 +14,30 @@ class OptionsManager {
     this.updateUI();
   }
 
+  getDefaultSettings() {
+    return {
+      groupBySubdomain: true,
+      defaultStrictMode: false,
+      defaultMergeAcrossWindows: true,
+      clearGroupsOnStartup: true
+    };
+  }
+
   async loadSettings() {
     try {
       const result = await chrome.storage.sync.get(['manualRules', 'settings']);
       this.rules = result.manualRules || {};
-      this.settings = result.settings || {
-        groupBySubdomain: true,
-        defaultStrictMode: false,
-        defaultMergeAcrossWindows: true
+      this.settings = {
+        ...this.getDefaultSettings(),
+        ...(result.settings || {})
       };
     } catch (error) {
       console.warn('Sync storage unavailable, falling back to local storage:', error);
       const result = await chrome.storage.local.get(['manualRules', 'settings']);
       this.rules = result.manualRules || {};
-      this.settings = result.settings || {
-        groupBySubdomain: true,
-        defaultStrictMode: false,
-        defaultMergeAcrossWindows: true
+      this.settings = {
+        ...this.getDefaultSettings(),
+        ...(result.settings || {})
       };
     }
   }
@@ -63,6 +70,11 @@ class OptionsManager {
 
     document.getElementById('defaultMergeAcrossWindows').addEventListener('change', (e) => {
       this.settings.defaultMergeAcrossWindows = e.target.checked;
+      this.saveSettings();
+    });
+
+    document.getElementById('clearGroupsOnStartup').addEventListener('change', (e) => {
+      this.settings.clearGroupsOnStartup = e.target.checked;
       this.saveSettings();
     });
 
@@ -152,6 +164,7 @@ class OptionsManager {
     document.getElementById('groupBySubdomain').checked = this.settings.groupBySubdomain;
     document.getElementById('defaultStrictMode').checked = this.settings.defaultStrictMode;
     document.getElementById('defaultMergeAcrossWindows').checked = this.settings.defaultMergeAcrossWindows;
+    document.getElementById('clearGroupsOnStartup').checked = this.settings.clearGroupsOnStartup !== false;
 
     // Update rules table
     this.updateRulesTable();
