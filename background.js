@@ -6,7 +6,8 @@ class AutoTabGrouper {
     this.rules = {};
     this.settings = {};
     this.groupingTimeouts = new Map();
-    this.isGrouping = false; // Prevent infinite loops
+    this.groupingWindows = new Set(); // Per-window grouping locks
+    this.pendingGroupingWindows = new Set(); // Windows that need a retry
     this.hostnameCache = new Map(); // Cache for hostname extraction
     this.groupCache = new Map(); // Cache for group information by window
     this.pendingTabs = new Map(); // Track tabs waiting to be grouped
@@ -203,10 +204,9 @@ class AutoTabGrouper {
         chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
           if (changeInfo.url && tab.url && !this.CHROME_URLS.test(tab.url)) {
             // Predictive grouping: start as soon as URL changes
+            // Group once per navigation (on loading); skip duplicate complete event
             if (changeInfo.status === 'loading' && changeInfo.url) {
-              this.debounceGrouping(tab.windowId, 'navigation'); // Fast grouping
-            } else if (changeInfo.status === 'complete') {
-              this.debounceGrouping(tab.windowId, 'navigation'); // Quick cleanup
+              this.debounceGrouping(tab.windowId, 'navigation');
             }
             
             // Handle strict mode separately
@@ -459,16 +459,27 @@ class AutoTabGrouper {
     }
   }
 
-  async shouldMoveToExistingGroup(groupName, currentWindowId) {
+  async getCrossWindowGroupMap(currentWindowId) {
     try {
-      // Get all groups across windows
       const allGroups = await chrome.tabGroups.query({});
-      const existingGroup = allGroups.find(g => g.title === groupName && g.windowId !== currentWindowId);
-      return existingGroup ? existingGroup.id : null;
+      const map = new Map();
+      for (const group of allGroups) {
+        if (group.windowId === currentWindowId) continue;
+        const title = group.title != null ? String(group.title).trim() : '';
+        if (title && !map.has(title)) {
+          map.set(title, group.id);
+        }
+      }
+      return map;
     } catch (error) {
-      console.error('Error checking for existing group:', error);
-      return null;
+      console.error('Error building cross-window group map:', error);
+      return new Map();
     }
+  }
+
+  async shouldMoveToExistingGroup(groupName, currentWindowId) {
+    const map = await this.getCrossWindowGroupMap(currentWindowId);
+    return map.get(groupName) ?? null;
   }
 
   setWindowCache(cacheKey, signature, complete) {
@@ -480,30 +491,30 @@ class AutoTabGrouper {
   }
 
   async groupTabsInWindow(windowId) {
-    if (this.isGrouping) {
+    if (this.groupingWindows.has(windowId)) {
+      this.pendingGroupingWindows.add(windowId);
       return;
     }
-    
-    this.isGrouping = true;
+
+    this.groupingWindows.add(windowId);
     const cacheKey = `window_${windowId}`;
     
     try {
-      const [currentSignature, ungroupedCount] = await Promise.all([
-        this.getWindowSignature(windowId),
-        this.getUngroupedTabCount(windowId)
-      ]);
+      const ungroupedCount = await this.getUngroupedTabCount(windowId);
       const cachedData = this.groupCache.get(cacheKey);
 
-      // Skip when window state is unchanged and no ungrouped HTTP tabs remain
-      if (cachedData?.signature === currentSignature && ungroupedCount === 0) {
+      // Fast path: all HTTP tabs grouped and cache is warm (1 API call)
+      if (ungroupedCount === 0 && cachedData?.complete) {
         return;
       }
 
       if (ungroupedCount === 0) {
-        this.setWindowCache(cacheKey, currentSignature, true);
+        const signature = await this.getWindowSignature(windowId);
+        this.setWindowCache(cacheKey, signature, true);
         return;
       }
 
+      const currentSignature = await this.getWindowSignature(windowId);
       this.performanceTracker.start('total_grouping');
 
       // Get tabs and existing groups in parallel
@@ -561,16 +572,19 @@ class AutoTabGrouper {
 
       // Skip processing if no tabs need grouping
       if (tabsToGroup.size === 0) {
-        this.setWindowCache(cacheKey, currentSignature, false);
+        this.setWindowCache(cacheKey, currentSignature, true);
         this.performanceTracker.end('total_grouping');
         return;
       }
 
-      // Enhanced batch processing with optimized concurrency
-      await this.processAllGroups(tabsToGroup, windowId, groupMap);
-      const finalSignature = await this.getWindowSignature(windowId);
-      const remainingUngrouped = await this.getUngroupedTabCount(windowId);
-      this.setWindowCache(cacheKey, finalSignature, remainingUngrouped === 0);
+      const successCount = await this.processAllGroups(tabsToGroup, windowId, groupMap);
+      if (successCount > 0) {
+        const finalSignature = await this.getWindowSignature(windowId);
+        const remainingUngrouped = await this.getUngroupedTabCount(windowId);
+        this.setWindowCache(cacheKey, finalSignature, remainingUngrouped === 0);
+      } else {
+        this.setWindowCache(cacheKey, currentSignature, false);
+      }
 
       this.performanceTracker.end('total_grouping');
 
@@ -583,7 +597,11 @@ class AutoTabGrouper {
         // Ignore cache update failures
       }
     } finally {
-      this.isGrouping = false;
+      this.groupingWindows.delete(windowId);
+      if (this.pendingGroupingWindows.has(windowId)) {
+        this.pendingGroupingWindows.delete(windowId);
+        setTimeout(() => this.groupTabsInWindow(windowId), 0);
+      }
     }
   }
 
@@ -615,26 +633,34 @@ class AutoTabGrouper {
   async processAllGroups(tabsToGroup, windowId, groupMap) {
     const createOperations = [];
     const moveOperations = [];
+
+    const needsCrossWindow = [...tabsToGroup.values()]
+      .some(({ config }) => config.mergeAcrossWindows);
+    const crossWindowGroups = needsCrossWindow
+      ? await this.getCrossWindowGroupMap(windowId)
+      : null;
     
-    // Separate operations by type for better batching
     for (const [groupName, {tabs, config}] of tabsToGroup) {
       if (tabs.length === 0) continue;
       
       const tabIds = tabs.map(t => t.id);
 
-      if (config.mergeAcrossWindows) {
-        const existingGroupId = await this.shouldMoveToExistingGroup(groupName, windowId);
-        if (existingGroupId) {
-          moveOperations.push({ groupId: existingGroupId, tabIds, groupName });
-          continue;
-        }
+      if (config.mergeAcrossWindows && crossWindowGroups?.has(groupName)) {
+        moveOperations.push({
+          groupId: crossWindowGroups.get(groupName),
+          tabIds,
+          groupName,
+          updateTitle: true
+        });
+        continue;
       }
 
       if (groupMap.has(groupName)) {
         moveOperations.push({
           groupId: groupMap.get(groupName),
           tabIds,
-          groupName
+          groupName,
+          updateTitle: false
         });
       } else {
         createOperations.push({
@@ -686,10 +712,12 @@ class AutoTabGrouper {
 
   async moveToGroupOptimized(operation) {
     try {
-      const { groupId, tabIds, groupName } = operation;
+      const { groupId, tabIds, groupName, updateTitle } = operation;
       await chrome.tabs.group({ tabIds, groupId });
-      const titleToSet = (groupName && String(groupName).trim()) || 'Unnamed';
-      await chrome.tabGroups.update(groupId, { title: titleToSet });
+      if (updateTitle) {
+        const titleToSet = (groupName && String(groupName).trim()) || 'Unnamed';
+        await chrome.tabGroups.update(groupId, { title: titleToSet });
+      }
       return true;
     } catch (error) {
       console.error('Error moving to group:', error);
@@ -771,9 +799,7 @@ class AutoTabGrouper {
 
     try {
       const windows = await chrome.windows.getAll();
-      for (const window of windows) {
-        await this.groupTabsInWindow(window.id);
-      }
+      await Promise.all(windows.map(window => this.groupTabsInWindow(window.id)));
     } catch (error) {
       console.error('Error organizing all tabs:', error);
     } finally {
