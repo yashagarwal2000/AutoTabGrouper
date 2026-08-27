@@ -471,27 +471,36 @@ class AutoTabGrouper {
     }
   }
 
+  setWindowCache(cacheKey, signature, complete) {
+    this.groupCache.set(cacheKey, {
+      signature,
+      timestamp: Date.now(),
+      complete
+    });
+  }
+
   async groupTabsInWindow(windowId) {
     if (this.isGrouping) {
       return;
     }
     
     this.isGrouping = true;
+    const cacheKey = `window_${windowId}`;
     
     try {
-      const cacheKey = `window_${windowId}`;
       const [currentSignature, ungroupedCount] = await Promise.all([
         this.getWindowSignature(windowId),
         this.getUngroupedTabCount(windowId)
       ]);
       const cachedData = this.groupCache.get(cacheKey);
 
-      // Skip when window state is unchanged since last fully successful grouping
-      if (cachedData?.signature === currentSignature && cachedData.complete && ungroupedCount === 0) {
+      // Skip when window state is unchanged and no ungrouped HTTP tabs remain
+      if (cachedData?.signature === currentSignature && ungroupedCount === 0) {
         return;
       }
 
       if (ungroupedCount === 0) {
+        this.setWindowCache(cacheKey, currentSignature, true);
         return;
       }
 
@@ -502,6 +511,8 @@ class AutoTabGrouper {
         chrome.tabs.query({ windowId, url: ['http://*/*', 'https://*/*'] }),
         chrome.tabGroups.query({ windowId })
       ]);
+
+      this.setWindowCache(cacheKey, currentSignature, false);
 
       // Create a map of existing groups for fast lookup (skip blank titles)
       const groupMap = new Map();
@@ -550,26 +561,27 @@ class AutoTabGrouper {
 
       // Skip processing if no tabs need grouping
       if (tabsToGroup.size === 0) {
+        this.setWindowCache(cacheKey, currentSignature, false);
+        this.performanceTracker.end('total_grouping');
         return;
       }
 
       // Enhanced batch processing with optimized concurrency
-      const groupedCount = await this.processAllGroups(tabsToGroup, windowId, groupMap);
+      await this.processAllGroups(tabsToGroup, windowId, groupMap);
+      const finalSignature = await this.getWindowSignature(windowId);
       const remainingUngrouped = await this.getUngroupedTabCount(windowId);
-
-      // Cache only when every HTTP tab in this window is grouped
-      if (groupedCount > 0 && remainingUngrouped === 0) {
-        this.groupCache.set(cacheKey, {
-          signature: await this.getWindowSignature(windowId),
-          timestamp: Date.now(),
-          complete: true
-        });
-      }
+      this.setWindowCache(cacheKey, finalSignature, remainingUngrouped === 0);
 
       this.performanceTracker.end('total_grouping');
 
     } catch (error) {
       console.error('Error grouping tabs:', error);
+      try {
+        const failureSignature = await this.getWindowSignature(windowId);
+        this.setWindowCache(cacheKey, failureSignature, false);
+      } catch {
+        // Ignore cache update failures
+      }
     } finally {
       this.isGrouping = false;
     }
@@ -609,23 +621,24 @@ class AutoTabGrouper {
       if (tabs.length === 0) continue;
       
       const tabIds = tabs.map(t => t.id);
-      
-      if (groupMap.has(groupName)) {
-        moveOperations.push({
-          groupId: groupMap.get(groupName), 
-          tabIds,
-          groupName
-        });
-      } else if (config.mergeAcrossWindows) {
+
+      if (config.mergeAcrossWindows) {
         const existingGroupId = await this.shouldMoveToExistingGroup(groupName, windowId);
         if (existingGroupId) {
           moveOperations.push({ groupId: existingGroupId, tabIds, groupName });
-        } else {
-          createOperations.push({ tabIds, groupName, windowId, config });
+          continue;
         }
+      }
+
+      if (groupMap.has(groupName)) {
+        moveOperations.push({
+          groupId: groupMap.get(groupName),
+          tabIds,
+          groupName
+        });
       } else {
         createOperations.push({
-          tabIds, 
+          tabIds,
           groupName,
           windowId,
           config
