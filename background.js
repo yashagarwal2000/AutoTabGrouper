@@ -75,15 +75,26 @@ class AutoTabGrouper {
     }, 5 * 60 * 1000);
   }
 
+  getDefaultSettings() {
+    return {
+      groupBySubdomain: true,
+      defaultStrictMode: false,
+      defaultMergeAcrossWindows: true
+    };
+  }
+
+  mergeSettings(stored) {
+    return {
+      ...this.getDefaultSettings(),
+      ...(stored || {})
+    };
+  }
+
   async loadSettings() {
     try {
       const result = await chrome.storage.sync.get(['manualRules', 'settings']);
       this.rules = result.manualRules || {};
-      this.settings = result.settings || {
-        groupBySubdomain: true,
-        defaultStrictMode: false,
-        defaultMergeAcrossWindows: true
-      };
+      this.settings = this.mergeSettings(result.settings);
       
       // Pre-process rules for faster matching
       this.updateRuleCache();
@@ -92,11 +103,7 @@ class AutoTabGrouper {
       console.warn('Sync storage unavailable, falling back to local storage:', error);
       const result = await chrome.storage.local.get(['manualRules', 'settings']);
       this.rules = result.manualRules || {};
-      this.settings = result.settings || {
-        groupBySubdomain: true,
-        defaultStrictMode: false,
-        defaultMergeAcrossWindows: true
-      };
+      this.settings = this.mergeSettings(result.settings);
       
       // Pre-process rules for faster matching
       this.updateRuleCache();
@@ -201,7 +208,7 @@ class AutoTabGrouper {
             this.updateRuleCache(); // Update cache when rules change
           }
           if (changes.settings) {
-            this.settings = changes.settings.newValue || {};
+            this.settings = this.mergeSettings(changes.settings.newValue);
           }
         });
       }
@@ -229,7 +236,7 @@ class AutoTabGrouper {
           sendResponse({ rules: this.rules, settings: this.settings });
           break;
         case 'updateSettings':
-          this.settings = { ...this.settings, ...message.settings };
+          this.settings = this.mergeSettings({ ...this.settings, ...message.settings });
           await this.saveSettings();
           sendResponse({ success: true });
           break;

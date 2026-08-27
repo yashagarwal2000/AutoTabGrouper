@@ -14,24 +14,31 @@ class OptionsManager {
     this.updateUI();
   }
 
+  getDefaultSettings() {
+    return {
+      groupBySubdomain: true,
+      defaultStrictMode: false,
+      defaultMergeAcrossWindows: true
+    };
+  }
+
+  mergeSettings(stored) {
+    return {
+      ...this.getDefaultSettings(),
+      ...(stored || {})
+    };
+  }
+
   async loadSettings() {
     try {
       const result = await chrome.storage.sync.get(['manualRules', 'settings']);
       this.rules = result.manualRules || {};
-      this.settings = result.settings || {
-        groupBySubdomain: true,
-        defaultStrictMode: false,
-        defaultMergeAcrossWindows: true
-      };
+      this.settings = this.mergeSettings(result.settings);
     } catch (error) {
       console.warn('Sync storage unavailable, falling back to local storage:', error);
       const result = await chrome.storage.local.get(['manualRules', 'settings']);
       this.rules = result.manualRules || {};
-      this.settings = result.settings || {
-        groupBySubdomain: true,
-        defaultStrictMode: false,
-        defaultMergeAcrossWindows: true
-      };
+      this.settings = this.mergeSettings(result.settings);
     }
   }
 
@@ -322,7 +329,7 @@ class OptionsManager {
         if (confirmImport) {
           this.rules = data.manualRules;
           if (data.settings) {
-            this.settings = { ...this.settings, ...data.settings };
+            this.settings = this.mergeSettings({ ...this.settings, ...data.settings });
           }
           await this.saveSettings();
           this.updateUI();

@@ -13,13 +13,29 @@ class PopupManager {
     this.updateUI();
   }
 
+  getDefaultSettings() {
+    return {
+      groupBySubdomain: true,
+      defaultStrictMode: false,
+      defaultMergeAcrossWindows: true
+    };
+  }
+
+  mergeSettings(stored) {
+    return {
+      ...this.getDefaultSettings(),
+      ...(stored || {})
+    };
+  }
+
   async loadSettings() {
     try {
       const response = await chrome.runtime.sendMessage({ action: 'getSettings' });
       this.rules = response.rules || {};
-      this.settings = response.settings || {};
+      this.settings = this.mergeSettings(response.settings);
     } catch (error) {
       console.warn('Error loading settings:', error);
+      this.settings = this.mergeSettings();
     }
   }
 
