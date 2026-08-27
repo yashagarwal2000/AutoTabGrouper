@@ -479,17 +479,23 @@ class AutoTabGrouper {
     this.isGrouping = true;
     
     try {
-      // Quick early exit checks
-      const ungroupedCount = await this.getUngroupedTabCount(windowId);
-      
+      const cacheKey = `window_${windowId}`;
+      const [currentSignature, ungroupedCount] = await Promise.all([
+        this.getWindowSignature(windowId),
+        this.getUngroupedTabCount(windowId)
+      ]);
+      const cachedData = this.groupCache.get(cacheKey);
+
+      // Skip when window state is unchanged since last fully successful grouping
+      if (cachedData?.signature === currentSignature && cachedData.complete && ungroupedCount === 0) {
+        return;
+      }
+
       if (ungroupedCount === 0) {
-        return; // Nothing to do!
+        return;
       }
 
       this.performanceTracker.start('total_grouping');
-
-      const cacheKey = `window_${windowId}`;
-      const currentSignature = await this.getWindowSignature(windowId);
 
       // Get tabs and existing groups in parallel
       const [tabs, existingGroups] = await Promise.all([
@@ -544,13 +550,6 @@ class AutoTabGrouper {
 
       // Skip processing if no tabs need grouping
       if (tabsToGroup.size === 0) {
-        // Don't cache when ungrouped tabs remain — allows retry on next event
-        if (ungroupedCount === 0) {
-          this.groupCache.set(cacheKey, {
-            signature: currentSignature,
-            timestamp: Date.now()
-          });
-        }
         return;
       }
 
@@ -562,7 +561,8 @@ class AutoTabGrouper {
       if (groupedCount > 0 && remainingUngrouped === 0) {
         this.groupCache.set(cacheKey, {
           signature: await this.getWindowSignature(windowId),
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          complete: true
         });
       }
 
