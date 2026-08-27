@@ -31,11 +31,15 @@ class PopupManager {
   async loadSettings() {
     try {
       const response = await chrome.runtime.sendMessage({ action: 'getSettings' });
+      if (!response) {
+        throw new Error('Extension background unavailable');
+      }
       this.rules = response.rules || {};
       this.settings = this.mergeSettings(response.settings);
     } catch (error) {
       console.warn('Error loading settings:', error);
       this.settings = this.mergeSettings();
+      this.rules = {};
     }
   }
 
@@ -114,11 +118,8 @@ class PopupManager {
   }
 
   updateUI() {
-    // Update toggle states
-    document.getElementById('strictMode').checked = this.settings.defaultStrictMode || false;
-    document.getElementById('mergeMode').checked = this.settings.defaultMergeAcrossWindows || false;
-
-    // Update rules preview
+    document.getElementById('strictMode').checked = this.settings.defaultStrictMode;
+    document.getElementById('mergeMode').checked = this.settings.defaultMergeAcrossWindows;
     this.updateRulesPreview();
   }
 

@@ -23,6 +23,9 @@ class AutoTabGrouper {
     // Pre-processed rules for faster matching
     this.ruleKeys = []; // Cached array of rule keys
     this.hasRules = false; // Quick check flag
+    this.lifecycleListenersRegistered = false;
+    this.pendingLifecycleOrganize = null;
+    this.organizeInProgress = false;
     
     this.init();
   }
@@ -38,6 +41,38 @@ class AutoTabGrouper {
     this.setupEventListeners();
     await this.seedDefaultRules();
     this.startCacheCleanup(); // Prevent memory leaks
+    this.setupLifecycleListeners();
+  }
+
+  setupLifecycleListeners() {
+    if (this.lifecycleListenersRegistered) {
+      return;
+    }
+    this.lifecycleListenersRegistered = true;
+
+    const scheduleLifecycleOrganize = (delay = 1000) => {
+      if (this.pendingLifecycleOrganize) {
+        clearTimeout(this.pendingLifecycleOrganize);
+      }
+
+      this.pendingLifecycleOrganize = setTimeout(async () => {
+        this.pendingLifecycleOrganize = null;
+        this.groupCache.clear();
+        await this.organizeAllTabs();
+      }, delay);
+    };
+
+    if (chrome.runtime?.onInstalled) {
+      chrome.runtime.onInstalled.addListener(() => {
+        scheduleLifecycleOrganize(500);
+      });
+    }
+
+    if (chrome.runtime?.onStartup) {
+      chrome.runtime.onStartup.addListener(() => {
+        scheduleLifecycleOrganize(1000);
+      });
+    }
   }
 
   startCacheCleanup() {
@@ -143,7 +178,7 @@ class AutoTabGrouper {
         const response = await fetch(chrome.runtime.getURL('rules.json'));
         const defaultData = await response.json();
         // Only load settings, not manual rules
-        this.settings = { ...this.settings, ...defaultData.settings };
+        this.settings = this.mergeSettings({ ...this.settings, ...defaultData.settings });
         await this.saveSettings();
       } catch (error) {
         console.warn('Could not load default settings:', error);
@@ -229,6 +264,7 @@ class AutoTabGrouper {
     try {
       switch (message.action) {
         case 'organizeNow':
+          this.groupCache.clear();
           await this.organizeAllTabs();
           sendResponse({ success: true });
           break;
@@ -452,14 +488,8 @@ class AutoTabGrouper {
 
       this.performanceTracker.start('total_grouping');
 
-      // Check cache first for window signature
       const cacheKey = `window_${windowId}`;
       const currentSignature = await this.getWindowSignature(windowId);
-      const cachedData = this.groupCache.get(cacheKey);
-      
-      if (cachedData && cachedData.signature === currentSignature) {
-        return; // No changes needed!
-      }
 
       // Get tabs and existing groups in parallel
       const [tabs, existingGroups] = await Promise.all([
@@ -467,16 +497,12 @@ class AutoTabGrouper {
         chrome.tabGroups.query({ windowId })
       ]);
 
-      // Update cache
-      this.groupCache.set(cacheKey, { 
-        signature: currentSignature,
-        timestamp: Date.now() 
-      });
-
-      // Create a map of existing groups for fast lookup
+      // Create a map of existing groups for fast lookup (skip blank titles)
       const groupMap = new Map();
       existingGroups.forEach(group => {
-        groupMap.set(group.title, group.id);
+        if (group.title != null && String(group.title).trim() !== '') {
+          groupMap.set(group.title, group.id);
+        }
       });
 
       const tabsToGroup = new Map(); // groupName -> {tabs, config}
@@ -518,11 +544,27 @@ class AutoTabGrouper {
 
       // Skip processing if no tabs need grouping
       if (tabsToGroup.size === 0) {
+        // Don't cache when ungrouped tabs remain — allows retry on next event
+        if (ungroupedCount === 0) {
+          this.groupCache.set(cacheKey, {
+            signature: currentSignature,
+            timestamp: Date.now()
+          });
+        }
         return;
       }
 
       // Enhanced batch processing with optimized concurrency
-      await this.processAllGroups(tabsToGroup, windowId, groupMap);
+      const groupedCount = await this.processAllGroups(tabsToGroup, windowId, groupMap);
+      const remainingUngrouped = await this.getUngroupedTabCount(windowId);
+
+      // Cache only when every HTTP tab in this window is grouped
+      if (groupedCount > 0 && remainingUngrouped === 0) {
+        this.groupCache.set(cacheKey, {
+          signature: await this.getWindowSignature(windowId),
+          timestamp: Date.now()
+        });
+      }
 
       this.performanceTracker.end('total_grouping');
 
@@ -574,6 +616,13 @@ class AutoTabGrouper {
           tabIds,
           groupName
         });
+      } else if (config.mergeAcrossWindows) {
+        const existingGroupId = await this.shouldMoveToExistingGroup(groupName, windowId);
+        if (existingGroupId) {
+          moveOperations.push({ groupId: existingGroupId, tabIds, groupName });
+        } else {
+          createOperations.push({ tabIds, groupName, windowId, config });
+        }
       } else {
         createOperations.push({
           tabIds, 
@@ -585,44 +634,53 @@ class AutoTabGrouper {
     }
     
     // Ultra-fast processing: Prioritize moves over creates
+    let successCount = 0;
     if (moveOperations.length > 0) {
-      // Move operations are faster, do them first
-      await Promise.all(moveOperations.map(op => this.moveToGroupOptimized(op)));
+      const results = await Promise.all(moveOperations.map(op => this.moveToGroupOptimized(op)));
+      successCount += results.filter(Boolean).length;
     }
     
     if (createOperations.length > 0) {
-      // Create operations in smaller parallel batches
-      const maxConcurrent = 2; // Reduced for stability
+      const maxConcurrent = 2;
       for (let i = 0; i < createOperations.length; i += maxConcurrent) {
         const batch = createOperations.slice(i, i + maxConcurrent);
-        await Promise.all(batch.map(op => this.createGroupOptimized(op, groupMap)));
+        const results = await Promise.all(batch.map(op => this.createGroupOptimized(op, groupMap)));
+        successCount += results.filter(Boolean).length;
       }
     }
+
+    return successCount;
   }
 
   async createGroupOptimized(operation, groupMap) {
     try {
       const { tabIds, groupName, windowId } = operation;
+      const titleToSet = (groupName && String(groupName).trim()) || 'Unnamed';
       const targetGroupId = await chrome.tabs.group({ 
         tabIds, 
         createProperties: { windowId } 
       });
       
-      await chrome.tabGroups.update(targetGroupId, { title: groupName });
-      groupMap.set(groupName, targetGroupId); // Update cache
+      await chrome.tabGroups.update(targetGroupId, { title: titleToSet });
+      groupMap.set(groupName, targetGroupId);
       
-      return targetGroupId;
+      return true;
     } catch (error) {
       console.error('Error creating group:', error);
+      return false;
     }
   }
 
   async moveToGroupOptimized(operation) {
     try {
-      const { groupId, tabIds } = operation;
+      const { groupId, tabIds, groupName } = operation;
       await chrome.tabs.group({ tabIds, groupId });
+      const titleToSet = (groupName && String(groupName).trim()) || 'Unnamed';
+      await chrome.tabGroups.update(groupId, { title: titleToSet });
+      return true;
     } catch (error) {
       console.error('Error moving to group:', error);
+      return false;
     }
   }
 
@@ -682,7 +740,7 @@ class AutoTabGrouper {
           
           // Optionally regroup according to new URL
           setTimeout(() => {
-            this.debounceGrouping(tab.windowId, 100);
+            this.debounceGrouping(tab.windowId, 'navigation');
           }, 100);
         }
       } catch (error) {
@@ -692,6 +750,12 @@ class AutoTabGrouper {
   }
 
   async organizeAllTabs() {
+    if (this.organizeInProgress) {
+      return;
+    }
+
+    this.organizeInProgress = true;
+
     try {
       const windows = await chrome.windows.getAll();
       for (const window of windows) {
@@ -699,6 +763,8 @@ class AutoTabGrouper {
       }
     } catch (error) {
       console.error('Error organizing all tabs:', error);
+    } finally {
+      this.organizeInProgress = false;
     }
   }
 }
